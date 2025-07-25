@@ -33,3 +33,23 @@ def kalman_filter(obs_acc, obs_gyro, ini_sta, ini_cov, tra_mat, obs_mat, pron_co
     updated_cov = (np.eye(len(kalman_gain)) - kalman_gain @ obs_mat) @ pred_cov
     
     return updated_state, updated_cov
+
+def main():
+    # Example usage of the Kalman filter
+    obs_acc = np.array([0.1, 0.2, 0.3])
+    obs_gyro = np.array([0.01, 0.02, 0.03])
+    ini_sta = np.zeros(6)  # Initial state
+    ini_cov = np.eye(6) * 0.1  # Initial covariance
+    tra_mat = np.eye(6)  # State transition matrix
+    obs_mat = np.eye(6)[:3]  # Observation matrix for acceleration
+    pron_cov = np.eye(6) * 0.01  # Process noise covariance
+    obsn_cov = np.eye(3) * 0.05  # Observation noise covariance
+
+    updated_state, updated_cov = kalman_filter(obs_acc, obs_gyro, ini_sta, ini_cov, tra_mat, obs_mat, pron_cov, obsn_cov)
+    
+    print("Updated State:", updated_state)
+    print("Updated Covariance:", updated_cov)
+
+if __name__ == "__main__":
+    main()
+# This code implements a basic Kalman filter for sensor data fusion, specifically for accelerometer and gyroscope data.
