@@ -11,7 +11,7 @@ def euler_from_accel(accel):
 def main():
     # --- データの準備 ---
     try:
-        df = pd.read_csv('imu_data.csv')
+        df = pd.read_csv('imu_data2.csv', encoding='shift_jis')
     except FileNotFoundError:
         print("エラー: 'imu_data.csv' が見つかりません。")
         return

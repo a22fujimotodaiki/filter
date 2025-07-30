@@ -33,7 +33,9 @@ def main():
     # --- シリアルポートの設定 ---
     try:
         # ★ご自身の環境に合わせてポート名 ('/dev/ttyUSB0' や 'COM3' など) を変更してください
-        ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+        #ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+        ser = serial.Serial('/dev/ttyS3', 115200, timeout=1)
+
         print(f"{ser.name} に接続しました。データの読み取りを開始します... (停止するには Ctrl+C を押してください)")
     except serial.SerialException as e:
         print(f"エラー: シリアルポートに接続できません。 {e}")
