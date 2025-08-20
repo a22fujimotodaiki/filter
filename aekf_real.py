@@ -1,30 +1,8 @@
 import serial
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 import time
 from collections import deque
-
-# --- グローバル変数として扱うデータ ---
-# (アニメーション関数内で値を更新し続けるため)
-timestamps = []
-estimated_states = []
-r_history = []
-start_time = 0.0
-last_time = 0.0
-
-# EKF関連の変数
-state = np.zeros(4)
-P = np.eye(4) * 0.1
-Q = np.diag([0.001, 0.001, 0.0001, 0.0001])
-R = np.diag([0.03, 0.03])
-H = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
-
-# 適応化のための変数
-WINDOW_SIZE = 50
-ADAPTATION_FACTOR = 0.05
-innovation_history = deque(maxlen=WINDOW_SIZE)
-
 
 # --- センサーデータ取得関数 ---
 def get_imu_data(ser):
@@ -34,9 +12,8 @@ def get_imu_data(ser):
         if line:
             ax, ay, az, gx, gy, gz = map(float, line.split(","))
             return np.array([ax, ay, az]), np.array([gx, gy, gz])
-    except Exception:
-        # リアルタイムプロット中はエラー表示を抑制
-        pass
+    except Exception as e:
+        print(f"データ読み取りエラー: {e}")
     return None, None
 
 # --- 加速度から角度を計算 ---
@@ -46,141 +23,155 @@ def euler_from_accel(accel):
     pitch = np.arctan2(-accel[0], np.sqrt(accel[1]**2 + accel[2]**2))
     return np.array([roll, pitch])
 
-
-# --- アニメーションのフレーム毎に呼び出される更新関数 ---
-def update(frame, ser, lines):
-    global state, P, R, last_time
-
-    # --- 1. データの取得と時間の計算 ---
-    accel, gyro = get_imu_data(ser)
-    if accel is None or gyro is None:
-        return lines.values() # データがなければ何もしない
-
-    current_time = time.time()
-    dt = current_time - last_time
-    if dt <= 0.001: # 更新間隔が短すぎる場合はスキップ
-        return lines.values()
-    last_time = current_time
-    
-    # --- 2. EKF計算 ---
-    phi, theta = state[0], state[1]
-    bias_x, bias_y = state[2], state[3]
-    p, q = gyro[:2] - np.array([bias_x, bias_y])
-
-    # 予測
-    F = np.eye(4)
-    F[0,1] = p * np.cos(phi) * np.tan(theta) - q * np.sin(phi) * np.tan(theta)
-    F[0,2] = -dt
-    F[0,3] = -dt * np.sin(phi) * np.tan(theta)
-    F[1,3] = -dt * np.cos(phi)
-
-    phi_dot = p + q * np.sin(phi) * np.tan(theta)
-    theta_dot = q * np.cos(phi)
-    
-    state[0] += dt * phi_dot
-    state[1] += dt * theta_dot
-    P = F @ P @ F.T + Q
-
-    # 更新
-    z = euler_from_accel(accel)
-    y = z - H @ state[:4]
-    
-    # Rの適応更新
-    innovation_history.append(y)
-    if len(innovation_history) == WINDOW_SIZE:
-        innov_array = np.array(innovation_history)
-        empirical_cov = np.mean([np.outer(inn, inn) for inn in innov_array], axis=0)
-        R = (1 - ADAPTATION_FACTOR) * R + ADAPTATION_FACTOR * empirical_cov
-    
-    S = H @ P @ H.T + R
-    K = P @ H.T @ np.linalg.inv(S)
-    state = state + K @ y
-    P = (np.eye(4) - K @ H) @ P
-    
-    # --- 3. データをリストに追加 ---
-    timestamps.append(current_time - start_time)
-    estimated_states.append(state.copy())
-    r_history.append(np.diag(R).copy())
-
-    # グラフ表示範囲を最新の500サンプルに制限
-    display_range = 500
-    ts = timestamps[-display_range:]
-    est_deg = np.rad2deg(np.array(estimated_states)[-display_range:, :2])
-    r_hist = np.array(r_history)[-display_range:]
-
-    # --- 4. グラフの描画データを更新 ---
-    lines['roll'].set_data(ts, est_deg[:, 0])
-    lines['pitch'].set_data(ts, est_deg[:, 1])
-    lines['r_roll'].set_data(ts, r_hist[:, 0])
-    lines['r_pitch'].set_data(ts, r_hist[:, 1])
-    
-    # 軸の範囲を自動調整
-    for key in lines:
-        ax = lines[key].axes
-        ax.relim()
-        ax.autoscale_view()
-
-    return lines.values()
-
-
 def main():
-    global start_time, last_time
-
     # --- シリアルポートの設定 ---
     try:
         ser = serial.Serial('/dev/ttyS3', 115200, timeout=1)
-        print(f"{ser.name} に接続しました。グラフウィンドウを閉じるとプログラムが終了します。")
+        print(f"{ser.name} に接続しました。データの読み取りを開始します... (停止するには Ctrl+C を押してください)")
     except serial.SerialException as e:
         print(f"エラー: シリアルポートに接続できません。 {e}")
         return
 
-    # --- 時間の初期化 ---
+    # --- EKFの初期設定 (ロール・ピッチ) ---
+    state = np.zeros(4) 
+    P = np.eye(4) * 0.1
+    Q = np.diag([0.001, 0.001, 0.0001, 0.0001])
+    R = np.diag([0.02, 0.02]) 
+    H = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
+    
+    # --- ヨー角の初期化 ---
+    yaw_angle_rad = 0.0
+
+    # --- ★適応化のための追加パラメータ★ ---
+    WINDOW_SIZE = 5
+    ADAPTATION_FACTOR = 0.05
+    innovation_history = deque(maxlen=WINDOW_SIZE)
+
+    # --- データ保存用リスト ---
+    timestamps = []
+    estimated_states = []
+    r_history = []
+    raw_angles = [] ### 変更・追加 ###: フィルタ前の生データを保存するリスト
+    ### 変更・追加 ###: 角速度積分値を保存するリスト
+    gyro_integrated_angles = []
+
+    ### 変更・追加 ###: 角速度を積分するための角度変数を初期化
+    gyro_integrated_angle = np.zeros(2) # [roll, pitch]
     start_time = time.time()
     last_time = start_time
-    
-    # --- グラフの初期設定 ---
-    fig, axs = plt.subplots(2, 1, figsize=(12, 10))
-    fig.suptitle('Real-time Adaptive EKF', fontsize=16)
 
-    # 上のグラフ（角度）
-    roll_line, = axs[0].plot([], [], 'b-', label='EKF Roll')
-    pitch_line, = axs[0].plot([], [], 'g-', label='EKF Pitch')
-    axs[0].set_ylabel('Angle [deg]')
-    axs[0].legend(loc='upper left')
-    axs[0].grid(True)
-    
-    # 下のグラフ（Rの値）
-    r_roll_line, = axs[1].plot([], [], 'r-', label='Adaptive R for Roll')
-    r_pitch_line, = axs[1].plot([], [], 'm-', label='Adaptive R for Pitch')
+    try:
+        while True:
+            accel, gyro = get_imu_data(ser)
+            
+            if accel is not None and gyro is not None:
+                current_time = time.time()
+                dt = current_time - last_time
+                last_time = current_time
+                
+                timestamps.append(current_time - start_time)
+
+                ### 変更・追加 ###: 角速度を単純に積分して「生の値」を計算
+                # gyro[:2] は [gx, gy] (ロールとピッチの角速度)
+                gyro_integrated_angle += gyro[:2] * dt
+                gyro_integrated_angles.append(gyro_integrated_angle.copy())
+                # --- 【ロール・ピッチの計算 (EKF)】 ---
+                # --- 予測(Predict)ステップ ---
+                phi, theta = state[0], state[1]
+                bias_x, bias_y = state[2], state[3]
+                p, q = gyro[:2] - np.array([bias_x, bias_y])
+
+                F = np.eye(4)
+                F[0,1] = p * np.cos(phi) * np.tan(theta) - q * np.sin(phi) * np.tan(theta)
+                F[0,2] = -dt
+                F[0,3] = -dt * np.sin(phi) * np.tan(theta)
+                F[1,3] = -dt * np.cos(phi)
+
+                phi_dot = p + q * np.sin(phi) * np.tan(theta)
+                theta_dot = q * np.cos(phi)
+
+                state[0] += dt * phi_dot
+                state[1] += dt * theta_dot
+                
+                P = F @ P @ F.T + Q
+
+                # --- 更新(Update)ステップ ---
+                z = euler_from_accel(accel)
+                raw_angles.append(z) ### 変更・追加 ###: 生データをリストに保存
+                
+                y = z - H @ state[:4]
+
+                # --- ★Rの適応更新ロジック★ ---
+                innovation_history.append(y)
+                if len(innovation_history) == WINDOW_SIZE:
+                    innov_array = np.array(innovation_history)
+                    empirical_cov = np.mean([np.outer(inn, inn) for inn in innov_array], axis=0)
+                    R = (1 - ADAPTATION_FACTOR) * R + ADAPTATION_FACTOR * empirical_cov
+                
+                S = H @ P @ H.T + R
+                K = P @ H.T @ np.linalg.inv(S)
+                
+                state = state + K @ y
+                P = (np.eye(4) - K @ H) @ P
+                
+                estimated_states.append(state.copy())
+                r_history.append(np.diag(R).copy())
+                
+                # --- 【ヨー角の計算 (単純積分)】 ---
+                gz = gyro[2] 
+                yaw_angle_rad += gz * dt
+                
+                # --- ターミナル表示 (Rの値も表示) ---
+                print(f"Roll: {np.rad2deg(state[0]):.2f}, Pitch: {np.rad2deg(state[1]):.2f}, R_roll: {R[0,0]:.4f}, R_pitch: {R[1,1]:.4f}", end='\r')
+
+
+    except KeyboardInterrupt:
+        print("\nプログラムを停止します。グラフを生成しています...")
+    finally:
+        ser.close()
+        print("シリアルポートを閉じました。")
+
+    # --- グラフの描画 ---
+    if not estimated_states:
+        print("データが収集されなかったため、グラフは生成されません。")
+        return
+        
+    estimated_states = np.array(estimated_states)
+    estimated_deg = np.rad2deg(estimated_states[:, :2])
+    r_history = np.array(r_history)
+    ### 変更・追加 ###: 保存した角速度積分値をNumPy配列に変換し、度に変換
+    gyro_integrated_angles = np.array(gyro_integrated_angles)
+    gyro_deg = np.rad2deg(gyro_integrated_angles)
+
+    fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+    fig.suptitle('Adaptive EKF for IMU Attitude Estimation', fontsize=16)
+
+    ### 変更・追加 ###: フィルタ前のデータをグラフに追加
+    # RollとPitchのグラフ
+    # フィルタ後のデータ（実線）
+    axs[0].plot(timestamps, estimated_deg[:, 0], 'b-', label='EKF Roll', linewidth=2)
+    axs[0].plot(timestamps, estimated_deg[:, 1], 'g-', label='EKF Pitch', linewidth=2)
+    # フィルタ前のデータ（点線）
+    axs[1].plot(timestamps, gyro_deg[:, 0], 'c-', label='Raw Roll (from Gyro)', linewidth=1)
+    axs[1].plot(timestamps, gyro_deg[:, 1], 'm-', label='Raw Pitch (from Gyro)', linewidth=1)
+    axs[1].set_ylabel('Angle [deg]')
+    axs[1].legend()
+    axs[1].grid(True)
+
+    # Rの値のグラフ
+    """
+    axs[1].plot(timestamps, r_history[:, 0], 'r-', label='Adaptive R for Roll')
+    axs[1].plot(timestamps, r_history[:, 1], 'orange', linestyle='-', label='Adaptive R for Pitch')
     axs[1].set_ylabel('Measurement Noise Covariance (R)')
     axs[1].set_xlabel('Time [s]')
     axs[1].set_yscale('log')
-    axs[1].legend(loc='upper left')
+    axs[1].legend()
     axs[1].grid(True, which="both")
+    """
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
-    
-    # 描画する線を辞書にまとめる
-    lines = {
-        'roll': roll_line, 'pitch': pitch_line, 
-        'r_roll': r_roll_line, 'r_pitch': r_pitch_line
-    }
-
-    # --- アニメーションの開始 ---
-    ani = animation.FuncAnimation(
-        fig, 
-        update, 
-        fargs=(ser, lines), 
-        interval=50, 
-        blit=False,
-        cache_frame_data=False) # 警告抑制のための引数
-
-    plt.show()
-
-    # ウィンドウが閉じられたらシリアルポートも閉じる
-    ser.close()
-    print("シリアルポートを閉じました。")
-
+    plt.savefig('adaptive_ekf_result_with_raw.png')
+    print("グラフを 'adaptive_ekf_result_with_raw.png' として保存しました。")
 
 if __name__ == "__main__":
     main()
