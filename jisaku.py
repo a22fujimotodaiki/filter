@@ -39,4 +39,3 @@ def main():
     path_history.append(position.copy())
     
 
-    
