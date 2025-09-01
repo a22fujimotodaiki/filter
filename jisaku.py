@@ -38,4 +38,5 @@ def main():
     velocity = np.zeros(2)
     path_history.append(position.copy())
     
+
     
