@@ -26,7 +26,8 @@ def euler_from_accel(accel):
 def main():
     # --- シリアルポートの設定 ---
     try:
-        ser = serial.Serial('/dev/ttyS3', 115200, timeout=1)
+        ser = serial.Serial('COM4', 115200, timeout=1)
+        #ser = serial.Serial('/dev/ttyS3', 115200, timeout=1)
         print(f"{ser.name} に接続しました。データの読み取りを開始します... (停止するには Ctrl+C を押してください)")
     except serial.SerialException as e:
         print(f"エラー: シリアルポートに接続できません。 {e}")

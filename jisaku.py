@@ -7,6 +7,7 @@ def get_imu_data(ser):
     """シリアルポートから1行読み込み、IMUデータを返す"""
     try:
         line = ser.readline().decode('utf-8').strip()
+        #line = ser.readline().decode('utf-8').strip()
         if line:
             ax, ay, az, gx, gy, gz = map(float, line.split(","))
             return np.array([ax, ay, az]), np.array([gx, gy, gz])
@@ -21,11 +22,12 @@ def euler_from_accel(accel):
 
 def main():
     try:
-        ser = serial.Serial('/dev/ttyS3', 115200, timeout=1)
+        ser = serial.Serial('COM4', 115200, timeout=1)
+        #ser = serial.Serial('/dev/ttyS3', 115200, timeout=1)
         print("シリアルに接続")
     except serial.SerialException as e:
-        print(f"シリアル接続エラー": {e}")
-        return
+        print(f"シリアル接続エラー: {e}")
+        return 
     
     timestamps = []
     accel_angles_history = []
@@ -37,5 +39,24 @@ def main():
     position = np.zeros(2)
     velocity = np.zeros(2)
     path_history.append(position.copy())
-    
 
+    start_time = time.time()
+    last_time = start_time
+
+    try:
+        while True:
+            accel, gyro = get_imu_data(ser)
+
+            if accel is not None and gyro is not None:
+                current_time = time.time()
+                dt = current_time - last_time
+                if dt <= 0:
+                    continue
+                last_time = current_time
+
+                timestamps.append(current_time - start_time)
+
+                gz = gyro[2]
+                yaw_an
+if __name__ == "__main__":
+    main()
