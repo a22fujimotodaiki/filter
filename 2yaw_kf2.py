@@ -3,7 +3,49 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 from scipy.spatial.transform import Rotation as R
-import csv  # ★追加：CSVファイルを扱うためのライブラリ
+import csv
+
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+# ★変更：バイアス推定を行わない1次元のカルマンフィルタ
+# ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+class KalmanFilter:
+    def __init__(self):
+        # 状態変数 [角度] の1次元（スカラー）
+        self.x = 0.0
+        
+        # 状態の不確かさ（スカラー）
+        self.P = 1.0
+        
+        # プロセスノイズ（スカラー）
+        # ジャイロの角速度の時間変化の不確かさ
+        self.Q = 0.001
+        
+        # 観測ノイズ（スカラー）
+        # 加速度センサから計算した角度の不確かさ
+        self.R = 0.03
+
+    def predict(self, gyro_rate, dt):
+        """予測ステップ"""
+        # 状態方程式に基づいて次状態を予測
+        self.x = self.x + gyro_rate * dt
+        
+        # 誤差の不確かさを更新 (P = P + Q)
+        self.P = self.P + self.Q
+        
+        return self.x # 予測した角度を返す
+
+    def update(self, accel_angle):
+        """更新ステップ"""
+        # カルマンゲインを計算
+        K = self.P / (self.P + self.R)
+        
+        # 観測値で状態を更新
+        self.x = self.x + K * (accel_angle - self.x)
+        
+        # 誤差の不確かさを更新
+        self.P = (1 - K) * self.P
+        
+        return self.x # 更新後の角度を返す
 
 def get_imu_data(ser):
     """シリアルポートから1行読み込み、IMUデータを返す"""
@@ -11,9 +53,7 @@ def get_imu_data(ser):
         line = ser.readline().decode('utf-8').strip()
         if line:
             ax, ay, az, gx, gy, gz = map(float, line.split(","))
-            # ジャイロの単位が deg/s の場合はラジアンに変換
-            # return np.array([ax, ay, az]), np.deg2rad(np.array([gx, gy, gz]))
-            return np.array([ax, ay, az]), np.array([gx, gy, gz]) # 単位が rad/s の場合
+            return np.array([ax, ay, az]), np.array([gx, gy, gz])
     except Exception as e:
         print(f"データ読み取りエラー: {e}")
     return None, None
@@ -59,14 +99,19 @@ def main():
     position = np.zeros(2)
     velocity = np.zeros(2)
     path_history = [position.copy()]
-    timestamps = [0.0] # ★追加：タイムスタンプを保存するリスト
+    timestamps = [0.0]
 
-    # 相補フィルター用の変数
+    # カルマンフィルタのインスタンスを作成
+    kf_roll = KalmanFilter()
+    kf_pitch = KalmanFilter()
+    # 初期角度を設定
+    kf_roll.x = initial_roll
+    kf_pitch.x = initial_pitch
+    
     roll, pitch, yaw = initial_roll, initial_pitch, 0.0
-    alpha = 0.98
 
     print("\n--- 計測を開始します ---")
-    measurement_start_time = time.time() # 計測開始時刻を記録
+    measurement_start_time = time.time()
     last_time = measurement_start_time
     
     try:
@@ -78,15 +123,24 @@ def main():
                 if dt <= 0: continue
                 last_time = current_time
                 
+                # ★重要：ここでバイアスを引くことで、フィルタはバイアス補正済みの値を受け取る
                 gyro -= gyro_offset
 
-                # --- 1. 相補フィルターで姿勢を計算 ---
+                # --- 1. カルマンフィルタで姿勢を計算 ---
+                # 加速度センサーから角度を計算
                 accel_roll = np.arctan2(accel[1], accel[2])
                 accel_pitch = np.arctan2(-accel[0], np.sqrt(accel[1]**2 + accel[2]**2))
-                roll = alpha * (roll + gyro[0] * dt) + (1 - alpha) * accel_roll
-                pitch = alpha * (pitch + gyro[1] * dt) + (1 - alpha) * accel_pitch
-                yaw += gyro[2] * dt
+                
+                # カルマンフィルタの予測と更新ステップを実行
+                roll_predicted = kf_roll.predict(gyro[0], dt)
+                roll = kf_roll.update(accel_roll)
+                
+                pitch_predicted = kf_pitch.predict(gyro[1], dt)
+                pitch = kf_pitch.update(accel_pitch)
 
+                # ヨー角はジャイロの積分のみ（ドリフトします）
+                yaw += gyro[2] * dt
+                
                 # --- 2. 姿勢から重力成分を除去 ---
                 r = R.from_euler('xyz', [roll, pitch, yaw], degrees=False)
                 accel_world = r.apply(accel)
@@ -97,25 +151,20 @@ def main():
                 velocity += linear_accel_world[:2] * dt
                 position += velocity * dt
                 path_history.append(position.copy())
-                timestamps.append(current_time - measurement_start_time) # ★追加：経過時間を記録
+                timestamps.append(current_time - measurement_start_time)
 
                 print(f"Roll:{np.rad2deg(roll):6.1f}, Pitch:{np.rad2deg(pitch):6.1f}, Yaw:{np.rad2deg(yaw):6.1f} | Pos:(x={position[0]:.2f}, y={position[1]:.2f})", end='\r')
 
     except KeyboardInterrupt:
         print("\n\n計測を停止しました。")
-        
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        # ★追加：CSVファイルにデータを保存する処理
-        # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        # （CSV保存処理は省略）
         if len(path_history) > 1:
-            csv_filename = 'path_data.csv'
+            csv_filename = 'path_data_kalman.csv'
             print(f"位置データを '{csv_filename}' に保存しています...")
             try:
                 with open(csv_filename, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
-                    # ヘッダーを書き込む
                     writer.writerow(['Timestamp (s)', 'X Position (m)', 'Y Position (m)'])
-                    # zip関数を使ってタイムスタンプと位置データをまとめて処理
                     for ts, pos in zip(timestamps, path_history):
                         writer.writerow([ts, pos[0], pos[1]])
                 print("保存が完了しました。")
@@ -129,17 +178,17 @@ def main():
     if len(path_history) > 1:
         path = np.array(path_history)
         plt.figure(figsize=(8, 8))
-        plt.plot(path[:, 0], path[:, 1], 'm-', label='Movement Path')
+        plt.plot(path[:, 0], path[:, 1], 'c-', label='Movement Path (Kalman)')
         plt.plot(path[0, 0], path[0, 1], 'go', markersize=10, label='Start')
         plt.plot(path[-1, 0], path[-1, 1], 'rs', markersize=10, label='End')
-        plt.title('Estimated 2D Path (Complementary Filter)')
+        plt.title('Estimated 2D Path (Kalman Filter)')
         plt.xlabel('X Position [m]')
         plt.ylabel('Y Position [m]')
         plt.legend()
         plt.grid(True)
         plt.gca().set_aspect('equal', adjustable='box')
-        plt.savefig('path_with_complementary_filter.png')
+        plt.savefig('path_with_kalman_filter.png')
         plt.show()
-
+        
 if __name__ == "__main__":
     main()
